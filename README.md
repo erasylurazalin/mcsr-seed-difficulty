@@ -67,14 +67,19 @@ re-download of 11 million matches cannot.
 
 ## Match types
 
-`match_type` is not documented, so I checked it against the data:
+`match_type` is not documented, so I worked it out from the data and from
+knowing the game:
 
-| type | what it looks like | usable? |
+| type | what it is | usable? |
 |---|---|---|
-| 2 | always has elo changes | yes, this is ranked 1v1 |
-| 1 | no elo changes, mostly placement matches and bot opponents | no |
-| 3 | no elo changes, sometimes only one player, so private or solo runs | no |
-| 4 | rare, no elo changes, not identified yet | no |
+| 2 | ranked 1v1, always carries elo changes | yes, this is the whole dataset |
+| 1 | casual, placement matches, bot opponents | no |
+| 3 | private and solo runs, sometimes only one player | no |
+| 4 | event matches | no |
+
+Only type 2 carries elo, and elo is the only measure of player skill available
+here. Without it there is no way to separate "this seed was slow" from "this
+player was slow", so everything else is dropped.
 
 The collector asks the server for `type=2` directly, which it supports. That is
 2.25x fewer requests per usable match than downloading everything.
@@ -168,6 +173,32 @@ Rules that follow:
 - Never compare a seed type across brackets where its availability differs.
   Buried treasure has no low elo comparison and never will.
 
+`dataset.elo_controlled_effect()` does the binning so this is the default way to
+compare seeds rather than something to remember. It also reports the elo range
+each level actually occurs in, so the buried treasure problem is visible in the
+output instead of hiding in it:
+
+```
+OVERWORLD, holding elo fixed
+                       effect      95% ci      n   available at
+RUINED_PORTAL           -3.5%     +/- 0.9  2,249   600-2299
+BURIED_TREASURE         +0.2%     +/- 1.2  1,032   1200-2299   (not distinguishable from zero)
+VILLAGE                 +0.4%     +/- 0.8  3,047   400-2299    (not distinguishable from zero)
+DESERT_TEMPLE           +0.9%     +/- 0.9  2,555   400-2299
+SHIPWRECK               +1.8%     +/- 0.9  2,249   500-2399
+
+NETHER, holding elo fixed
+BRIDGE                  -1.6%     +/- 0.8  2,931   400-2399
+HOUSING                 -1.5%     +/- 0.8  2,939   400-2399
+TREASURE                +1.4%     +/- 0.8  2,660   400-2399
+STABLES                 +2.1%     +/- 0.9  2,686   400-2399
+```
+
+On 25k matches, ruined portal is the only overworld with a clear effect, and
+bastion type matters about as much as overworld type does. Village and buried
+treasure sit inside their own error bars, so on this much data they are simply
+average, not "slightly slow".
+
 ## Should the low elo end be dropped?
 
 No, but for a plainer reason than I first thought. Low elo runs are noisier and
@@ -188,11 +219,11 @@ does not filter on elo, and should not.
 
 ## Status
 
-Collector works. `dataset.py` builds the modelling table. No model yet.
+Collector works. `dataset.py` builds the modelling table and does elo
+controlled comparisons. No model yet.
 
 ## Open questions
 
-- What is match type 4?
 - `variations` is a variable length list of tags, 72 of them appear at least 50
   times. Multi-hot for now. Some carry a number (`end_spawn:buried:47`) that is
   probably worth pulling out as its own feature.

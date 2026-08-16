@@ -13,6 +13,7 @@ import json
 import sqlite3
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 DB_PATH = Path(__file__).parent / "data" / "matches.db"
@@ -28,7 +29,9 @@ SELECT
     MAX(p.elo_rate) AS elo_max
 FROM matches m
 JOIN match_players p ON p.match_id = m.id
-WHERE m.match_type = 2          -- ranked only, the rest carry no elo
+WHERE m.match_type = 2          -- ranked only. 1 is casual and placements,
+                                -- 3 is private and solo, 4 is event matches.
+                                -- None of the others carry elo.
   AND m.decayed = 0             -- decay matches are not real play
   AND m.overworld IS NOT NULL
 GROUP BY m.id
@@ -114,6 +117,82 @@ def variation_features(df, min_count=50):
     )
 
 
+def elo_controlled_effect(df, by="overworld", bin_width=100, min_per_bin=15,
+                          min_total=100):
+    """How much time a seed feature costs, holding player skill fixed.
+
+    Do not compare seed types by taking a plain group mean. The game hands out
+    seed types by rank: buried treasure only exists at 1200+, ruined portal
+    only above roughly 600, villages are 55% of seeds at the bottom and 20% at
+    the top. So a seed type partly encodes skill, and skill drives run time.
+    A plain group mean measures both and reports it as one number.
+
+    This compares each run only against other runs in the same `bin_width`
+    slice of elo, so the skill difference cancels out.
+
+    Returns a DataFrame indexed by the levels of `by`:
+
+        effect_pct  percent slower (+) or faster (-) than a typical run at the
+                    same elo
+        ci95        half width of a 95% interval. If it is wider than
+                    effect_pct, you have not measured anything.
+        n           runs backing the estimate
+        elo_from    the elo range this level actually occurs in. Levels with
+        elo_to      different ranges are NOT comparable to each other, they are
+                    each only comparable to their own elo neighbours.
+
+    Censored rows are dropped, since a forfeit has no completion time. That is
+    itself a bias, bad seeds get quit on, so read these as effects among runs
+    that finished.
+    """
+    d = df[df.minutes.notna()].copy()
+    if len(d) < min_total:
+        raise ValueError(f"only {len(d)} finished runs, need at least {min_total}")
+
+    d["elo_bin"] = (d.elo_mean // bin_width) * bin_width
+    # each run as a ratio to the average run at its own skill level
+    d["rel"] = d.minutes / d.groupby("elo_bin")["minutes"].transform("mean")
+
+    rows = []
+    for level, g in d.groupby(by):
+        # only trust elo bins where this level has real support, otherwise a
+        # single run in a sparse bin swings the whole estimate
+        counts = g.groupby("elo_bin").size()
+        usable = counts[counts >= min_per_bin].index
+        g = g[g.elo_bin.isin(usable)]
+        if len(g) < min_total:
+            continue
+
+        rows.append({
+            by: level,
+            "effect_pct": 100 * (g.rel.mean() - 1),
+            "ci95": 100 * 1.96 * g.rel.std() / np.sqrt(len(g)),
+            "n": len(g),
+            "elo_from": int(usable.min()),
+            "elo_to": int(usable.max() + bin_width - 1),
+        })
+
+    if not rows:
+        raise ValueError(f"no level of {by!r} had enough support to estimate")
+
+    return (pd.DataFrame(rows)
+              .set_index(by)
+              .sort_values("effect_pct"))
+
+
+def print_effect(df, by="overworld", **kwargs):
+    """elo_controlled_effect, formatted for reading in a terminal."""
+    t = elo_controlled_effect(df, by=by, **kwargs)
+    print(f"\n{by.upper()}, holding elo fixed")
+    print(f"{'':<20}{'effect':>9}{'95% ci':>12}{'n':>7}   available at")
+    # itertuples, not iterrows: iterrows casts the whole row to one dtype and
+    # would turn the integer elo bounds into 600.0
+    for r in t.itertuples():
+        flat = "" if abs(r.effect_pct) > r.ci95 else "   (not distinguishable from zero)"
+        print(f"{str(r.Index):<20}{r.effect_pct:>+8.1f}%{'  +/- ' + format(r.ci95, '.1f'):>12}"
+              f"{r.n:>7,}   {r.elo_from}-{r.elo_to}{flat}")
+
+
 if __name__ == "__main__":
     df = load()
     print(f"{len(df):,} ranked matches")
@@ -121,3 +200,6 @@ if __name__ == "__main__":
     print(f"  censored (forfeit, true time unknown): {df.censored.sum():,}")
     print(f"  elo range: {df.elo_mean.min():.0f} to {df.elo_mean.max():.0f}")
     print(f"  seed variation tags kept: {variation_features(df).shape[1]}")
+
+    print_effect(df, "overworld")
+    print_effect(df, "nether")
