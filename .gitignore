@@ -1,0 +1,14 @@
+# collected data, can always be re-downloaded from the API
+data/
+*.db
+*.db-journal
+*.db-wal
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# private working notes
+CLAUDETODO.md

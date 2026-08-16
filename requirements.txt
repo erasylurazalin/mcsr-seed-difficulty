@@ -1,0 +1,9 @@
+# needed right now, for collecting
+requests
+
+# needed once there is data to look at
+pandas
+matplotlib
+
+# needed for the modelling phase
+scikit-learn
