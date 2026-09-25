@@ -14,6 +14,7 @@ database itself, not in a state file.
 """
 
 import argparse
+import calendar
 import sys
 import time
 
@@ -67,7 +68,7 @@ def get_page(before=None, after=None, match_type=None):
     raise RuntimeError("gave up after 5 attempts")
 
 
-def backfill(conn, pages, match_type=2):
+def backfill(conn, pages, match_type=2, until=None):
     """Walk backwards from the oldest match we have (or from now, if empty).
 
     match_type=2 asks the server for ranked matches only. This is a filter on
@@ -75,25 +76,37 @@ def backfill(conn, pages, match_type=2):
     unranked matches carry no elo at all, so they can never be used here.
     Filtering on elo or on run time would be a different and much worse idea,
     see the "What not to filter" section of the README.
+
+    `until` (unix seconds) stops the walk once it reaches matches older than
+    that, so "all of season 10" is a date instead of a guessed page count.
     """
     lo, _ = db.bounds(conn)
     cursor = lo  # None on an empty database, which means "start at newest"
     total_new = 0
     started = time.time()
 
-    for page in range(1, pages + 1):
+    page = 0
+    while pages is None or page < pages:
+        page += 1
         matches = get_page(before=cursor, match_type=match_type)
         if not matches:
             print("reached the end of available history")
             break
+
+        if until is not None:
+            matches = [m for m in matches if m["date"] >= until]
+            if not matches:
+                print("reached the --until date")
+                break
 
         new = db.insert_matches(conn, matches)
         total_new += new
         cursor = matches[-1]["id"]
 
         elapsed = time.time() - started
+        day = time.strftime("%Y-%m-%d", time.gmtime(matches[-1]["date"]))
         print(
-            f"page {page}/{pages}  "
+            f"page {page}/{pages or '?'}  back to {day}  "
             f"ids {matches[0]['id']}..{matches[-1]['id']}  "
             f"+{new} new  "
             f"total {db.count(conn):,}  "
@@ -104,33 +117,60 @@ def backfill(conn, pages, match_type=2):
     return total_new
 
 
-def update(conn):
-    """Fetch everything newer than the newest match we already have."""
-    _, hi = db.bounds(conn)
-    if hi is None:
-        print("database is empty, run backfill first")
-        return 0
+def update(conn, match_type=2):
+    """Fetch everything newer than the newest match we already have.
+
+    The API only pages newest first, even with `after`, so this has to walk
+    down from now until it meets data we already have. After a few weeks away
+    that walk takes hours. If it were stopped halfway, the matches it did get
+    would become the new "newest", and the next run would stop at them and
+    never fill the hole underneath. So the floor and the cursor are saved in
+    the database, and an interrupted walk carries on where it stopped.
+    """
+    floor = db.get_state(conn, "update_floor")
+    cursor = db.get_state(conn, "update_cursor")
+    resumed = floor is not None
+
+    if resumed:
+        print(f"resuming an unfinished update, filling down to id {floor}")
+    else:
+        _, floor = db.bounds(conn)
+        if floor is None:
+            print("database is empty, run backfill first")
+            return 0
+        db.set_state(conn, "update_floor", floor)
 
     total_new = 0
-    cursor = None
     while True:
-        matches = get_page(before=cursor)
+        matches = get_page(before=cursor, match_type=match_type)
         if not matches:
             break
 
         # stop once the page runs past what we already stored
-        fresh = [m for m in matches if m["id"] > hi]
+        fresh = [m for m in matches if m["id"] > floor]
         total_new += db.insert_matches(conn, fresh)
 
         if len(fresh) < len(matches):
             break  # caught up
 
         cursor = matches[-1]["id"]
-        print(f"  +{len(fresh)} (total new {total_new})")
+        db.set_state(conn, "update_cursor", cursor)
+        day = time.strftime("%Y-%m-%d", time.gmtime(matches[-1]["date"]))
+        print(f"  back to {day}, id {cursor}  +{len(fresh)} (total new {total_new:,})")
         time.sleep(SECONDS_BETWEEN_REQUESTS)
 
-    print(f"up to date, {total_new} new matches, {db.count(conn):,} stored")
+    db.clear_state(conn)
+    print(f"up to date, {total_new:,} new matches, {db.count(conn):,} stored")
+
+    # a resumed walk started below the present, so pick up what came in since
+    if resumed:
+        total_new += update(conn, match_type)
     return total_new
+
+
+def date_arg(s):
+    """YYYY-MM-DD, read as midnight UTC, to unix seconds."""
+    return calendar.timegm(time.strptime(s, "%Y-%m-%d"))
 
 
 def main():
@@ -139,8 +179,12 @@ def main():
 
     p_back = sub.add_parser("backfill", help="walk backwards into history")
     p_back.add_argument(
-        "--pages", type=int, default=100,
-        help="pages of 100 matches to fetch (default 100, so 10k matches)",
+        "--pages", type=int, default=None,
+        help="pages of 100 matches to fetch (default 100, or no limit with --until)",
+    )
+    p_back.add_argument(
+        "--until", type=date_arg, default=None,
+        help="stop at matches older than this UTC date, e.g. 2026-01-02",
     )
     p_back.add_argument(
         "--type", type=int, default=2, dest="match_type",
@@ -154,7 +198,8 @@ def main():
 
     try:
         if args.mode == "backfill":
-            n = backfill(conn, args.pages, args.match_type or None)
+            pages = args.pages or (None if args.until else 100)
+            n = backfill(conn, pages, args.match_type or None, args.until)
             print(f"\ndone, {n} new matches, {db.count(conn):,} stored total")
         else:
             update(conn)

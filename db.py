@@ -58,6 +58,12 @@ CREATE TABLE IF NOT EXISTS match_players (
 );
 
 CREATE INDEX IF NOT EXISTS idx_players_uuid ON match_players(uuid);
+
+-- where an unfinished `collect.py update` stopped, see update() there
+CREATE TABLE IF NOT EXISTS collector_state (
+    key   TEXT PRIMARY KEY,
+    value INTEGER
+);
 """
 
 
@@ -141,3 +147,18 @@ def bounds(conn):
 
 def count(conn):
     return conn.execute("SELECT COUNT(*) c FROM matches").fetchone()["c"]
+
+
+def get_state(conn, key):
+    row = conn.execute("SELECT value FROM collector_state WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def set_state(conn, key, value):
+    conn.execute("INSERT OR REPLACE INTO collector_state VALUES (?, ?)", (key, value))
+    conn.commit()
+
+
+def clear_state(conn):
+    conn.execute("DELETE FROM collector_state")
+    conn.commit()

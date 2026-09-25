@@ -18,6 +18,21 @@ import pandas as pd
 
 DB_PATH = Path(__file__).parent / "data" / "matches.db"
 
+# Each season has 4 phases of about a month. Elo drifts upward across a season:
+# a 1500 in phase 1 can be the same player as a 2200 in phase 4. So elo only
+# means one thing within a phase, and comparisons have to hold the phase fixed.
+#
+# The dates are when phases 1, 2 and 3 end, taken from Liquipedia's phase
+# pages. Phase 4 runs to the end of the season. Read as midnight UTC, which is
+# what the API reports for season 12. Season 12 only has its first boundary so
+# far, from the API's phase-leaderboard endpoint.
+PHASE_ENDS = {
+    9: ["2025-09-21", "2025-10-25", "2025-11-29"],
+    10: ["2026-02-02", "2026-03-02", "2026-04-02"],
+    11: ["2026-05-30", "2026-06-30", "2026-07-30"],
+    12: ["2026-09-30"],
+}
+
 # One row per match. result_time is joined here raw and interpreted below,
 # because what it means depends on `forfeited`.
 _QUERY = """
@@ -40,8 +55,24 @@ HAVING COUNT(p.uuid) = 2        -- drop anything that is not a clean 1v1
 """
 
 
-def load(min_elo=None, max_elo=None, seasons=None, include_censored=True,
-         db_path=DB_PATH):
+def add_phase(df):
+    """Phase 1 to 4 within the season, from the match date.
+
+    NaN for a season missing from PHASE_ENDS. Season 12 past its last known
+    boundary is NaN too, not a guess.
+    """
+    phase = pd.Series(np.nan, index=df.index)
+    for season, ends in PHASE_ENDS.items():
+        rows = df.season == season
+        ends = pd.to_datetime(ends)
+        phase[rows] = 1 + np.searchsorted(ends, df.date[rows], side="right")
+        if len(ends) < 3:
+            phase[rows & (df.date >= ends[-1])] = np.nan
+    return phase
+
+
+def load(min_elo=None, max_elo=None, seasons=None, phases=None,
+         include_censored=True, db_path=DB_PATH):
     """Load matches as a DataFrame.
 
     Columns of interest:
@@ -50,6 +81,10 @@ def load(min_elo=None, max_elo=None, seasons=None, include_censored=True,
         censored  True if the match ended in a forfeit, so nobody finished
         cutoff    for censored matches, when the match ended, in minutes.
                   The true completion time is unknown but longer than this.
+        phase     1 to 4 within the season, see PHASE_ENDS
+
+    seasons and phases are lists, e.g. seasons=[10, 11, 12], phases=[1] for
+    only phase 1 of each. Elo is only comparable within a phase.
 
     min_elo/max_elo filter on the match average elo. Both players are matched
     by elo so they are always close together, which means this filters whole
@@ -82,6 +117,7 @@ def load(min_elo=None, max_elo=None, seasons=None, include_censored=True,
     df["end_towers"] = df.end_towers.map(parse_list)
     df["variations"] = df.variations.map(parse_list)
     df["date"] = pd.to_datetime(df.date, unit="s")
+    df["phase"] = add_phase(df)
 
     if min_elo is not None:
         df = df[df.elo_mean >= min_elo]
@@ -89,6 +125,8 @@ def load(min_elo=None, max_elo=None, seasons=None, include_censored=True,
         df = df[df.elo_mean <= max_elo]
     if seasons is not None:
         df = df[df.season.isin(seasons)]
+    if phases is not None:
+        df = df[df.phase.isin(phases)]
     if not include_censored:
         df = df[~df.censored]
 
