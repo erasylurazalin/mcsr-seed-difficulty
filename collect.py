@@ -34,7 +34,7 @@ session = requests.Session()
 session.headers["User-Agent"] = "mcsr-seed-difficulty/0.1 (learning project)"
 
 
-def get_page(before=None, after=None, match_type=None):
+def get_page(before=None, after=None, match_type=None, season=None):
     """Fetch up to 100 matches, newest first. Retries on rate limit."""
     params = {"count": PAGE_SIZE}
     if before is not None:
@@ -43,6 +43,8 @@ def get_page(before=None, after=None, match_type=None):
         params["after"] = after
     if match_type is not None:
         params["type"] = match_type
+    if season is not None:
+        params["season"] = season
 
     for attempt in range(5):
         try:
@@ -68,7 +70,7 @@ def get_page(before=None, after=None, match_type=None):
     raise RuntimeError("gave up after 5 attempts")
 
 
-def backfill(conn, pages, match_type=2, until=None):
+def backfill(conn, pages, match_type=2, until=None, season=None):
     """Walk backwards from the oldest match we have (or from now, if empty).
 
     match_type=2 asks the server for ranked matches only. This is a filter on
@@ -79,18 +81,29 @@ def backfill(conn, pages, match_type=2, until=None):
 
     `until` (unix seconds) stops the walk once it reaches matches older than
     that, so "all of season 10" is a date instead of a guessed page count.
+
+    Without `season`, the API only pages back a few months, then returns
+    nothing, which looks exactly like the end of history. Older seasons are
+    only reachable by asking for them by number. With `season`, the walk
+    starts below the oldest match stored for that season, or at the season's
+    newest match if there is none yet, and ends when the season runs out.
     """
-    lo, _ = db.bounds(conn)
-    cursor = lo  # None on an empty database, which means "start at newest"
+    if season is None:
+        lo, _ = db.bounds(conn)
+    else:
+        lo = conn.execute("SELECT MIN(id) FROM matches WHERE season = ?",
+                          (season,)).fetchone()[0]
+    cursor = lo  # None when nothing is stored yet, which means "start at newest"
     total_new = 0
     started = time.time()
 
     page = 0
     while pages is None or page < pages:
         page += 1
-        matches = get_page(before=cursor, match_type=match_type)
+        matches = get_page(before=cursor, match_type=match_type, season=season)
         if not matches:
-            print("reached the end of available history")
+            print("reached the start of the season" if season else
+                  "reached the end of available history")
             break
 
         if until is not None:
@@ -126,9 +139,17 @@ def update(conn, match_type=2):
     would become the new "newest", and the next run would stop at them and
     never fill the hole underneath. So the floor and the cursor are saved in
     the database, and an interrupted walk carries on where it stopped.
+
+    The walk can also cross a season boundary. Without a `season` parameter
+    the API stops at the start of the current season and returns an empty
+    page, which looks exactly like being caught up. That once left two weeks
+    of season 11 silently missing. So an empty page before reaching stored
+    data means "step into the previous season", never "done".
     """
     floor = db.get_state(conn, "update_floor")
     cursor = db.get_state(conn, "update_cursor")
+    season = db.get_state(conn, "update_season")
+    last_season = db.get_state(conn, "update_last_season")
     resumed = floor is not None
 
     if resumed:
@@ -141,10 +162,23 @@ def update(conn, match_type=2):
         db.set_state(conn, "update_floor", floor)
 
     total_new = 0
+    stepped = False
     while True:
-        matches = get_page(before=cursor, match_type=match_type)
+        matches = get_page(before=cursor, match_type=match_type, season=season)
         if not matches:
-            break
+            if stepped or last_season is None:
+                # two empty pages in a row, something else is going on.
+                # keep the state so the next run resumes right here
+                print("the API returned nothing before reaching stored data, "
+                      "stopping without marking the update as done")
+                return total_new
+            season = last_season - 1
+            stepped = True
+            db.set_state(conn, "update_season", season)
+            print(f"  reached the start of season {last_season}, "
+                  f"carrying on in season {season}")
+            continue
+        stepped = False
 
         # stop once the page runs past what we already stored
         fresh = [m for m in matches if m["id"] > floor]
@@ -154,7 +188,9 @@ def update(conn, match_type=2):
             break  # caught up
 
         cursor = matches[-1]["id"]
+        last_season = matches[-1]["season"]
         db.set_state(conn, "update_cursor", cursor)
+        db.set_state(conn, "update_last_season", last_season)
         day = time.strftime("%Y-%m-%d", time.gmtime(matches[-1]["date"]))
         print(f"  back to {day}, id {cursor}  +{len(fresh)} (total new {total_new:,})")
         time.sleep(SECONDS_BETWEEN_REQUESTS)
@@ -183,6 +219,11 @@ def main():
         help="pages of 100 matches to fetch (default 100, or no limit with --until)",
     )
     p_back.add_argument(
+        "--season", type=int, default=None,
+        help="walk back through this season only, e.g. 10. Needed for anything "
+             "older than a few months, see backfill()",
+    )
+    p_back.add_argument(
         "--until", type=date_arg, default=None,
         help="stop at matches older than this UTC date, e.g. 2026-01-02",
     )
@@ -198,8 +239,8 @@ def main():
 
     try:
         if args.mode == "backfill":
-            pages = args.pages or (None if args.until else 100)
-            n = backfill(conn, pages, args.match_type or None, args.until)
+            pages = args.pages or (None if args.until or args.season else 100)
+            n = backfill(conn, pages, args.match_type or None, args.until, args.season)
             print(f"\ndone, {n} new matches, {db.count(conn):,} stored total")
         else:
             update(conn)
