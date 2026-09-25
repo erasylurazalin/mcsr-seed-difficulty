@@ -20,8 +20,15 @@ endpoint returns 100 matches per request and already includes the seed, both
 players with their elo at the time, and the result, so the collector never has
 to fetch matches one by one.
 
-History goes back to season 5 (June 2024). Match ids currently run from about
-1,000,000 to 12,450,000, so there are roughly 11 million matches available.
+The API has history back to season 5 (June 2024), but without a `season`
+parameter it only pages back part of the way, then returns an empty page that
+looks exactly like the end of history. That cost me two weeks of season 11
+once. Older seasons have to be asked for by number, `collect.py backfill
+--season 10`.
+
+The dataset is season 10 onward (January 2026 to now). Before that the data is
+noisier, players have gotten much better since, and the player base grew a lot
+around season 10.
 
 ## Setup
 
@@ -34,6 +41,7 @@ python3 -m venv .venv
 
 ```sh
 .venv/bin/python collect.py backfill --pages 100   # 10k matches, ~2.5 min
+.venv/bin/python collect.py backfill --season 10   # a whole past season, hours
 .venv/bin/python collect.py update                 # anything new since last run
 ```
 
