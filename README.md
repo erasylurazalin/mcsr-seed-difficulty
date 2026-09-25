@@ -37,12 +37,7 @@ python3 -m venv .venv
 .venv/bin/python collect.py update                 # anything new since last run
 ```
 
-Both stop cleanly on Ctrl-C and pick up where they left off. Progress is the
-contents of the database, not a state file, so there is nothing to get out of
-sync.
-
-Rate limit is 500 requests per 10 minutes. The collector waits 1.5s between
-requests, which is a bit under that. Roughly 240k matches per hour.
+Rate limit is 500 requests per 10 minutes. 
 
 ## What lands in the database
 
@@ -103,8 +98,7 @@ player finding a god seed, it is an opponent giving up after five minutes.
 `dataset.py` handles this: `minutes` is only populated for real completions, and
 forfeits get a `cutoff` instead, marked `censored`.
 
-55% of ranked matches end in a forfeit, so this is most of the data, not an
-edge case.
+55% of ranked matches end in a forfeit, so this is most of the data.
 
 ## What not to filter
 
@@ -181,23 +175,24 @@ output instead of hiding in it:
 ```
 OVERWORLD, holding elo fixed
                        effect      95% ci      n   available at
-RUINED_PORTAL           -3.5%     +/- 0.9  2,249   600-2299
-BURIED_TREASURE         +0.2%     +/- 1.2  1,032   1200-2299   (not distinguishable from zero)
-VILLAGE                 +0.4%     +/- 0.8  3,047   400-2299    (not distinguishable from zero)
-DESERT_TEMPLE           +0.9%     +/- 0.9  2,555   400-2299
-SHIPWRECK               +1.8%     +/- 0.9  2,249   500-2399
+RUINED_PORTAL           -4.4%     +/- 0.2 48,944   500-2599
+BURIED_TREASURE         -0.1%     +/- 0.3 21,834   1000-2599   (not distinguishable from zero)
+VILLAGE                 +0.8%     +/- 0.2 67,735   200-2599
+DESERT_TEMPLE           +1.5%     +/- 0.2 55,908   300-2599
+SHIPWRECK               +1.7%     +/- 0.2 49,721   300-2599
 
 NETHER, holding elo fixed
-BRIDGE                  -1.6%     +/- 0.8  2,931   400-2399
-HOUSING                 -1.5%     +/- 0.8  2,939   400-2399
-TREASURE                +1.4%     +/- 0.8  2,660   400-2399
-STABLES                 +2.1%     +/- 0.9  2,686   400-2399
+HOUSING                 -1.7%     +/- 0.2 62,179   300-2599
+BRIDGE                  -1.5%     +/- 0.2 62,996   300-2599
+TREASURE                +1.3%     +/- 0.2 58,881   300-2599
+STABLES                 +2.0%     +/- 0.2 60,088   300-2599
 ```
 
-On 25k matches, ruined portal is the only overworld with a clear effect, and
-bastion type matters about as much as overworld type does. Village and buried
-treasure sit inside their own error bars, so on this much data they are simply
-average, not "slightly slow".
+That is 523k matches, 244k of them finished. At 25k the intervals were around
++/- 0.9 and only ruined portal was clearly separated from zero. At 523k they
+are +/- 0.2 and village and desert temple separate too. Buried treasure still
+does not, on 22k runs, so it really does look average rather than slightly
+slow. Bastion type matters about as much as overworld type does.
 
 ## Should the low elo end be dropped?
 
@@ -217,17 +212,75 @@ than contradicting it, which is a useful thing to be able to show.
 `dataset.load(min_elo=...)` exists for slicing at analysis time. The collector
 does not filter on elo, and should not.
 
+## The model
+
+`model.py`. Target is `log(minutes)`, so a coefficient reads as a percentage
+and the elo control is a covariate instead of a binning trick.
+
+Train/test split is grouped by `seed_id`. 523k matches use only 355k distinct
+seeds, so a plain random split would put a seed in train and its twin in test
+and score memorisation.
+
+```
+                          mean abs error  r2 (log scale)
+always predict the average       4.89 min          -0.000
+elo only                         2.97 min           0.646
+seed only                        4.71 min           0.077
+elo + seed                       2.93 min           0.656
+elo + seed, linear               3.06 min           0.623
+```
+
+Read that top to bottom and the project answers its own question. Elo does
+almost all the work: knowing nothing gets you 4.89 minutes of error, knowing
+elo gets you 2.97. Adding every seed feature buys 4 more seconds.
+
+So the seed is real but small, which is the same story the percentages tell.
+Runs at this level vary by a lot more than 5%, and the seed moves the average
+by 5% at most. That is a boring headline and it is the correct one. A model
+that claimed to predict a run from its seed would be predicting the player.
+
+Elo itself: **-7.1% run time per 100 elo**, about -30% over a 500 elo climb.
+
+### Individual coefficients are not readable, and here is why
+
+`type:structure:lava` and `type:structure:completable` appear only on ruined
+portal seeds, and between them cover all but 3 of the 48,957 of them. So those
+columns are the ruined portal column wearing a hat. Ridge splits one real
+effect across three near identical columns however it likes, and the raw
+output has ruined portal at **+6.0%** while the binned estimate has it at
+-4.4%. Neither the sign nor the size means anything on its own.
+
+Summing every seed coefficient that applies to a match, then averaging within
+seed type, gives the number that survives:
+
+| overworld | model total | binned estimate |
+|---|---|---|
+| RUINED_PORTAL | -5.2% | -4.4% |
+| BURIED_TREASURE | -0.6% | -0.1% |
+| SHIPWRECK | +1.3% | +1.7% |
+| DESERT_TEMPLE | +1.5% | +1.5% |
+| VILLAGE | +1.8% | +0.8% |
+
+Two methods, same ordering, sizes within about a point. That agreement is the
+point of running both.
+
 ## Status
 
 Collector works. `dataset.py` builds the modelling table and does elo
-controlled comparisons. No model yet.
+controlled comparisons. `model.py` fits the first model and reproduces them.
+Forfeits are still dropped rather than handled.
 
 ## Open questions
 
-- `variations` is a variable length list of tags, 72 of them appear at least 50
-  times. Multi-hot for now. Some carry a number (`end_spawn:buried:47`) that is
-  probably worth pulling out as its own feature.
+- Forfeits are 53% of matches and dropping them biases every number here the
+  same direction, since bad seeds are what people quit on. Everything above
+  understates the cost of a bad seed. Survival analysis is the fix.
+- The number in `end_spawn:buried:47` is the burial depth and it does matter.
+  Across the 29 depths that occur often enough to fit, depth correlates +0.63
+  with the time cost. Currently each depth is its own binary column, which
+  spends 29 parameters learning a line. It should be one numeric feature.
 - Each match yields one time, the winner's, which is the minimum of two runs.
-  So the outcome depends on both players, not one. Not sure yet whether to model
-  it as a minimum or just control for both elos and move on.
-- Seed types are badly unbalanced. JUNGLE_TEMPLE showed up 3 times in 700.
+  So the outcome depends on both players, not one. Not sure yet whether to
+  model it as a minimum or just control for both elos and move on.
+- Seed types are badly unbalanced. JUNGLE_TEMPLE is rare enough that it never
+  clears the support threshold.

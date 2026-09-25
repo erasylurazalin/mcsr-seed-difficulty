@@ -103,3 +103,36 @@ across brackets.
 Rule for the rest of this project: bin on elo before comparing seed types, or
 just work inside 1200+ where the distribution is actually uniform and assignment
 is genuinely random.
+
+## the same column three times
+
+523k matches now, 244k finished. The elo controlled table barely moved, it just
+got precise: intervals from +/- 0.9 down to +/- 0.2. Village and desert temple
+separated from zero, buried treasure still did not.
+
+First real model. Target log(minutes), elo as a covariate instead of binning,
+train/test grouped by seed_id because 523k matches only use 355k seeds and I do
+not want a seed and its twin sitting on opposite sides of the split.
+
+Then the linear coefficients came out with ruined portal at +6.0%. The binned
+estimate says -4.4%. Same data, opposite sign.
+
+It is not a bug. type:structure:lava and type:structure:completable only ever
+occur on ruined portal seeds, and between them they cover 48,954 of the 48,957.
+The dummy and those two tags are the same column written three ways. Ridge has
+one effect to hand out and three identical places to put it, so it splits it
+however the penalty prefers, and each piece can land anywhere including the
+wrong side of zero.
+
+The sum is what is real. Add up every seed coefficient that applies to a match,
+average within seed type, and it lands at -5.2% against the binned -4.4%. All
+five seed types line up in the same order across both methods.
+
+Second time now that a number looked exciting and turned out to be an artifact
+of how the data is put together rather than a fact about Minecraft. Both times
+the check was cheap and I only ran it because the number disagreed with
+something I already believed.
+
+The actual headline is dull. Elo alone predicts a run to 2.97 minutes of error.
+Every seed feature I have buys 4 more seconds. The seed is real, it is about 5%,
+and it is nowhere near the size of the player.

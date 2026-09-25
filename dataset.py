@@ -23,7 +23,7 @@ DB_PATH = Path(__file__).parent / "data" / "matches.db"
 _QUERY = """
 SELECT
     m.id, m.date, m.season, m.forfeited, m.result_time,
-    m.overworld, m.nether, m.end_towers, m.variations,
+    m.seed_id, m.overworld, m.nether, m.end_towers, m.variations,
     AVG(p.elo_rate) AS elo_mean,
     MIN(p.elo_rate) AS elo_min,
     MAX(p.elo_rate) AS elo_max
