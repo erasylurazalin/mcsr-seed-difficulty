@@ -4,6 +4,9 @@ data/
 *.db-journal
 *.db-wal
 
+# collector output when run in the background
+*.log
+
 # python
 .venv/
 __pycache__/
